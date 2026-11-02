@@ -1,0 +1,10 @@
+# Files Docker should NOT send into the image build.
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.git/
+.pytest_cache/
+Dockerfile
+.dockerignore

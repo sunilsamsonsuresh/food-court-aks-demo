@@ -1,0 +1,53 @@
+# This is a template, not the final config. When the container starts, the
+# nginx image fills in the MENU_SERVICE_URL and ORDER_SERVICE_URL placeholders
+# below with the values of those environment variables. nginx's own variables
+# (like $host) are left untouched because no environment variables have those
+# names.
+#
+# This file holds only a "server" block. The image's main nginx.conf already
+# includes every file in /etc/nginx/conf.d/, which is where the filled-in
+# version of this template ends up.
+
+# Why the browser talks ONLY to nginx:
+# - The page and the APIs come from one address (localhost:8080), so the
+#   browser doesn't block the requests as "cross-origin" and the backends
+#   need no CORS setup.
+# - menu-service and order-service stay hidden inside the network. Only
+#   nginx is exposed to the outside world.
+# - The page just calls /api/...; it never needs to know where the backends
+#   actually live. Moving them only means changing an environment variable.
+
+server {
+    listen 80;
+
+    # Health check for Kubernetes: answered by nginx itself, never touches the backends.
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # The web page.
+    location / {
+        root  /usr/share/nginx/html;
+        index index.html;
+    }
+
+    # Stripping the /api prefix: when proxy_pass ends with a path (here /menu),
+    # nginx swaps the matched part of the URL (/api/menu) for that path.
+    #   /api/menu    -> /menu
+    #   /api/menu/3  -> /menu/3
+    location /api/menu {
+        proxy_pass ${MENU_SERVICE_URL}/menu;
+    }
+
+    #   /api/orders   -> /orders
+    #   /api/orders/1 -> /orders/1
+    location /api/orders {
+        proxy_pass ${ORDER_SERVICE_URL}/orders;
+    }
+
+    # Note: nginx looks up the backend names (menu-service, order-service) once,
+    # at startup. If a name can't be found, nginx refuses to start. So start the
+    # backends before the frontend.
+}

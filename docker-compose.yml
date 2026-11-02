@@ -1,0 +1,94 @@
+# Mini Food Court: starts the whole app with one command.
+#   Start:  docker compose up --build -d
+#   Stop:   docker compose down        (keeps the orders in the volume)
+#   Wipe:   docker compose down -v     (also deletes the volume = all orders)
+#
+# Compose puts all these services on one private network automatically.
+# Each service can reach the others by its service name (redis, menu-service, ...).
+
+# Project name: used as a prefix for container, network and volume names
+# (e.g. food-court-redis-1, food-court_redis-data).
+name: food-court
+
+services:
+  redis:
+    image: redis:7-alpine
+    # --appendonly yes: Redis writes every change to a file in /data straight
+    # away, so orders survive even if the container stops unexpectedly.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  menu-service:
+    build: ./menu-service
+    image: menu-service:v1
+    restart: unless-stopped
+    # Python is already in the image, so a one-line urllib request is enough
+    # (no need to install curl). urlopen fails on errors, which marks the check as failed.
+    # 127.0.0.1 instead of "localhost" avoids trying IPv6 first.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  order-service:
+    build: ./order-service
+    image: order-service:v1
+    restart: unless-stopped
+    environment:
+      MENU_SERVICE_URL: http://menu-service:8000
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      redis:
+        condition: service_healthy
+      menu-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  frontend:
+    build: ./frontend
+    image: frontend:v1
+    restart: unless-stopped
+    environment:
+      MENU_SERVICE_URL: http://menu-service:8000
+      ORDER_SERVICE_URL: http://order-service:8000
+    # Only the frontend publishes a port to your machine. The browser only ever
+    # talks to nginx, which forwards /api/... calls over the private network.
+    # Keeping redis and the APIs unpublished means nobody outside can reach
+    # them directly, so less is exposed. Kubernetes works the same way: only
+    # the frontend gets a public entry point, and the backends stay internal.
+    ports:
+      - "8080:80"
+    # nginx looks up the backend names ONCE, when it starts. If they're not up
+    # yet, nginx fails to start. So wait until both backends are healthy.
+    # restart: true also restarts the frontend whenever Compose recreates a
+    # backend (e.g. after a rebuild), so nginx picks up the backend's new address.
+    depends_on:
+      menu-service:
+        condition: service_healthy
+        restart: true
+      order-service:
+        condition: service_healthy
+        restart: true
+    # The Alpine-based nginx image has a small built-in wget we can use.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+# A named volume: storage managed by Docker that lives outside any container.
+# Removing the redis container doesn't delete it; only `docker compose down -v` does.
+volumes:
+  redis-data:

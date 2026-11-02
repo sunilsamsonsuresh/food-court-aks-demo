@@ -1,0 +1,7 @@
+# A namespace is like a folder inside the cluster. Everything for the food court
+# lives here, so you can list it, or delete it all, in one go:
+#   kubectl delete namespace food-court
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: food-court

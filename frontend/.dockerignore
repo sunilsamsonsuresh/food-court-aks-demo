@@ -1,0 +1,5 @@
+# Files Docker should NOT send into the image build.
+.git/
+.DS_Store
+Dockerfile
+.dockerignore

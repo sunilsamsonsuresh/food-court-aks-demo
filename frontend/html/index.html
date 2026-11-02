@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mini Food Court</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: #f6f4f0;
+      color: #2b2b2b;
+    }
+    header { background: #c0392b; color: white; padding: 20px 16px; text-align: center; }
+    header h1 { margin: 0; font-size: 1.8rem; }
+    main { max-width: 900px; margin: 0 auto; padding: 16px; }
+    h2 { border-bottom: 2px solid #e0dcd5; padding-bottom: 6px; }
+
+    .menu { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+    .card { background: white; border-radius: 10px; padding: 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+    .card h3 { margin: 0 0 4px; font-size: 1.1rem; }
+    .category { color: #777; font-size: 0.85rem; }
+    .price { font-size: 1.2rem; font-weight: 600; margin: 10px 0; }
+    .order-row { display: flex; gap: 8px; }
+    .order-row input { width: 64px; padding: 6px; border: 1px solid #ccc; border-radius: 6px; }
+    .order-row button {
+      flex: 1; padding: 6px 10px; border: none; border-radius: 6px;
+      background: #c0392b; color: white; font-weight: 600; cursor: pointer;
+    }
+    .order-row button:hover { background: #a93226; }
+    .order-row button:disabled { background: #aaa; cursor: wait; }
+
+    .message { padding: 10px 14px; border-radius: 8px; margin: 14px 0; display: none; }
+    .message.success { display: block; background: #e3f4e8; color: #1e6b3a; }
+    .message.error { display: block; background: #fbe4e2; color: #9b2a1f; }
+
+    table { width: 100%; border-collapse: collapse; background: white; border-radius: 10px; overflow: hidden; }
+    th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #eee; font-size: 0.95rem; }
+    th { background: #faf8f5; }
+    .muted { color: #777; }
+  </style>
+</head>
+<body>
+  <header><h1>🍛 Mini Food Court</h1></header>
+
+  <main>
+    <h2>Menu</h2>
+    <div id="message" class="message"></div>
+    <div id="menu" class="menu"><p class="muted">Loading menu…</p></div>
+
+    <h2>Orders</h2>
+    <div id="orders"><p class="muted">Loading orders…</p></div>
+  </main>
+
+  <script>
+    // All requests go to the same server that served this page (nginx).
+    // nginx forwards /api/... to the right backend service.
+    const menuEl = document.getElementById("menu");
+    const ordersEl = document.getElementById("orders");
+    const messageEl = document.getElementById("message");
+
+    function showMessage(text, type) {
+      messageEl.textContent = text;
+      messageEl.className = "message " + type;
+    }
+
+    // Turn a failed response into a readable message.
+    // FastAPI errors look like {"detail": "..."}. Validation errors (422) give
+    // "detail" as a list, and nginx errors (e.g. 502) are HTML, not JSON.
+    async function errorText(res) {
+      try {
+        const body = await res.json();
+        if (typeof body.detail === "string") return body.detail;
+        if (Array.isArray(body.detail) && body.detail.length) return body.detail[0].msg;
+      } catch (e) { /* response wasn't JSON */ }
+      return `Request failed (HTTP ${res.status})`;
+    }
+
+    async function loadMenu() {
+      try {
+        const res = await fetch("/api/menu");
+        if (!res.ok) throw new Error(await errorText(res));
+        const dishes = await res.json();
+
+        menuEl.innerHTML = "";
+        for (const dish of dishes) {
+          const card = document.createElement("div");
+          card.className = "card";
+          card.innerHTML = `
+            <h3></h3>
+            <div class="category"></div>
+            <div class="price"></div>
+            <div class="order-row">
+              <input type="number" min="1" value="1" aria-label="Quantity">
+              <button>Order</button>
+            </div>`;
+          // Use textContent (not innerHTML) for data, so text from the API
+          // can never be run as HTML.
+          card.querySelector("h3").textContent = dish.name;
+          card.querySelector(".category").textContent = dish.category;
+          card.querySelector(".price").textContent = "₹" + dish.price;
+
+          const qtyInput = card.querySelector("input");
+          const button = card.querySelector("button");
+          button.addEventListener("click", () => placeOrder(dish, qtyInput, button));
+          menuEl.appendChild(card);
+        }
+      } catch (err) {
+        menuEl.innerHTML = "";
+        showMessage("Could not load the menu: " + err.message, "error");
+      }
+    }
+
+    async function placeOrder(dish, qtyInput, button) {
+      button.disabled = true;
+      try {
+        const res = await fetch("/api/orders", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dish_id: dish.id, quantity: Number(qtyInput.value) }),
+        });
+        if (!res.ok) throw new Error(await errorText(res));
+        const order = await res.json();
+        showMessage(`Order #${order.id} placed: ${order.quantity} × ${order.dish_name} = ₹${order.total_price}`, "success");
+        qtyInput.value = 1;
+        loadOrders();
+      } catch (err) {
+        showMessage("Order failed: " + err.message, "error");
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function loadOrders() {
+      try {
+        const res = await fetch("/api/orders");
+        if (!res.ok) throw new Error(await errorText(res));
+        const orders = await res.json();
+
+        if (orders.length === 0) {
+          ordersEl.innerHTML = '<p class="muted">No orders yet.</p>';
+          return;
+        }
+
+        const table = document.createElement("table");
+        table.innerHTML = "<tr><th>#</th><th>Dish</th><th>Qty</th><th>Total</th><th>Status</th><th>Time</th></tr>";
+        // Newest orders first
+        for (const o of orders.slice().reverse()) {
+          const row = table.insertRow();
+          const cells = [
+            o.id, o.dish_name, o.quantity, "₹" + o.total_price, o.status,
+            new Date(o.created_at).toLocaleTimeString(),
+          ];
+          for (const value of cells) row.insertCell().textContent = value;
+        }
+        ordersEl.innerHTML = "";
+        ordersEl.appendChild(table);
+      } catch (err) {
+        ordersEl.innerHTML = "";
+        const p = document.createElement("p");
+        p.className = "muted";
+        p.textContent = "Could not load orders: " + err.message;
+        ordersEl.appendChild(p);
+      }
+    }
+
+    loadMenu();
+    loadOrders();
+  </script>
+</body>
+</html>

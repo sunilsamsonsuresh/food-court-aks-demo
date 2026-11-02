@@ -1,0 +1,75 @@
+# Redis: stores the orders. Three parts in one file, separated by "---".
+
+# 1) Ask Azure for a small disk (like the redis-data volume in docker compose)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data
+  namespace: food-court
+spec:
+  accessModes: ["ReadWriteOnce"]   # one node at a time can use it (that's how Azure disks work)
+  storageClassName: managed-csi    # built into AKS: an Azure Standard SSD disk
+  resources:
+    requests:
+      storage: 1Gi
+---
+# 2) Run Redis
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: food-court
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate   # stop the old pod BEFORE starting a new one, so two pods never fight over the disk
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          # "args", not "command": in Kubernetes, "command" would replace the image's own
+          # start-up script (which fixes folder permissions), so we only pass arguments.
+          args: ["redis-server", "--appendonly", "yes"]
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:          # "ready to receive traffic?"
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 5
+          livenessProbe:           # "still alive? if not, restart me"
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m             # 50m = 5% of one CPU, reserved for this container
+              memory: 64Mi
+            limits:
+              memory: 256Mi        # if it uses more, Kubernetes restarts it
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: redis-data
+---
+# 3) Give it a stable name ("redis") inside the cluster
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: food-court
+spec:
+  selector:
+    app: redis          # send traffic to pods with this label
+  ports:
+    - port: 6379
+      targetPort: 6379

@@ -1,0 +1,24 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+*.egg-info/
+
+# --- Environment / secrets ---
+.env
+.env.*
+
+# --- Docker ---
+# Local override files often hold machine-specific settings
+docker-compose.override.yml
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+
+# --- Local Azure notes (resource names for this machine/account) ---
+azure-notes.md

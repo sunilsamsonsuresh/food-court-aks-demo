@@ -1,0 +1,57 @@
+# frontend: nginx serves the web page and forwards /api/... to the backends.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: food-court
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: foodcourt48516.azurecr.io/frontend:v1
+          env:
+            - name: MENU_SERVICE_URL
+              value: "http://menu-service:8000"
+            - name: ORDER_SERVICE_URL
+              value: "http://order-service:8000"
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+---
+# LoadBalancer = Azure gives this Service a public IP (small extra cost).
+# Only the frontend gets one; the backends stay private, exactly like in docker compose.
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: food-court
+spec:
+  type: LoadBalancer
+  selector:
+    app: frontend
+  ports:
+    - port: 80
+      targetPort: 80

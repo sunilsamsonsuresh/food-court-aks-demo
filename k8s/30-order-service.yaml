@@ -1,0 +1,62 @@
+# order-service: places orders (checks menu-service, saves to Redis).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  namespace: food-court
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: order-service
+  template:
+    metadata:
+      labels:
+        app: order-service
+    spec:
+      # By default, Kubernetes adds extra env vars for every Service, for example
+      # REDIS_PORT=tcp://10.0.12.34:6379. That clashes with our REDIS_PORT=6379.
+      # Turning this off means the container only gets the env vars we list below.
+      enableServiceLinks: false
+      containers:
+        - name: order-service
+          image: foodcourt48516.azurecr.io/order-service:v1
+          env:
+            # Same settings as docker-compose.yml. "menu-service" and "redis"
+            # are the Service names from the files above.
+            - name: MENU_SERVICE_URL
+              value: "http://menu-service:8000"
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service
+  namespace: food-court
+spec:
+  selector:
+    app: order-service
+  ports:
+    - port: 8000
+      targetPort: 8000
