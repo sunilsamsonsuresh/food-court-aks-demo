@@ -869,11 +869,22 @@ resource group deletes it too. Managed identities are free.
 
 1. Open **id-github-foodcourt → Settings → Federated credentials → + Add credential**
 2. Federated credential scenario: **GitHub Actions deploying Azure resources**
-3. Organization: **sunilsamsonsuresh** · Repository: **food-court-aks-demo**
+3. Organization: **sunilsamsonsuresh** (ID `131870128`) · Repository: **food-court-aks-demo** (ID `1443386461`).
+   Enter the **repo name only**, not `owner/repo`. The form adds the owner itself.
 4. Entity: **Branch** · Branch: **main**
-5. Name: **github-main** → **Add**
+5. Name: any label, e.g. **github-main** → **Add**
 
-The subject it creates is `repo:sunilsamsonsuresh/food-court-aks-demo:ref:refs/heads/main`.
+The subject **must exactly match** what GitHub puts in its token. For this repo, GitHub sends the
+format with immutable IDs:
+
+```
+repo:sunilsamsonsuresh@131870128/food-court-aks-demo@1443386461:ref:refs/heads/main
+```
+
+> ⚠️ Our first deploy failed with `AADSTS700213: No matching federated identity record` because the
+> credential used the older name-only format (`repo:sunilsamsonsuresh/food-court-aks-demo:ref:refs/heads/main`).
+> The `azure/login` step prints the exact **"subject claim"** it sent. When in doubt, copy it from the Actions log.
+
 Pull requests (including from forks) and other branches **can't** log in. Only code on `main` can deploy.
 
 **3. Let it push images: `AcrPush` on the registry**
@@ -902,7 +913,7 @@ az identity create -g rg-foodcourt -n id-github-foodcourt -l centralindia
 az identity federated-credential create -g rg-foodcourt --identity-name id-github-foodcourt \
   --name github-main \
   --issuer https://token.actions.githubusercontent.com \
-  --subject repo:sunilsamsonsuresh/food-court-aks-demo:ref:refs/heads/main \
+  --subject 'repo:sunilsamsonsuresh@131870128/food-court-aks-demo@1443386461:ref:refs/heads/main' \
   --audiences api://AzureADTokenExchange
 
 PRINCIPAL_ID=$(az identity show -g rg-foodcourt -n id-github-foodcourt --query principalId -o tsv)
@@ -974,6 +985,8 @@ kubectl -n food-court get deployment -o wide    # IMAGES column shows :<commit-i
 | 9 | `kubectl apply --dry-run=client` errored without a cluster | Even client dry-run needs the cluster's API list | Checked YAML offline with Python instead |
 | 10 | Browser: `ERR_CONNECTION_TIMED_OUT` | Brave forced **https**, but the app serves only **http** | Open `http://<IP>` explicitly |
 | 11 | Python `CERTIFICATE_VERIFY_FAILED` when fetching prices | python.org Python on macOS has no certificates until "Install Certificates" is run | Used `curl` instead |
+| 12 | Deploy job: `AADSTS700213 No matching federated identity record` | The federated credential used `repo:owner/repo:...`, but GitHub sends `repo:owner@ID/repo@ID:...`. A later attempt typed `owner/repo` in the Repository field, which doubled the owner | Subject copied exactly from the "subject claim" in the Actions log. Repository field = repo name only |
+| 13 | After re-creating the managed identity: login/push fails again | A new identity has a **new Client ID** and **no roles** | Updated the `AZURE_CLIENT_ID` secret, re-added AcrPush + AKS Cluster User Role |
 
 ### Troubleshooting quick reference
 
