@@ -1,0 +1,125 @@
+# CI/CD for the Mini Food Court
+#
+#   test   (CI) - every pull request and every push: start the whole app with
+#                 docker compose on GitHub's machine and run smoke tests.
+#   deploy (CD) - only on the main branch, and only if "test" passed:
+#                 build the images, push them to Azure Container Registry,
+#                 and roll them out to AKS.
+#
+# Azure login uses OIDC: GitHub hands this workflow a short-lived identity token,
+# and Azure trusts it because of a "federated credential" set up for this repo's
+# main branch. No Azure passwords are stored in GitHub. See DEPLOYMENT.md, Step 14.
+
+name: CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"          # docs-only changes don't need a new deployment
+  workflow_dispatch:     # adds a "Run workflow" button in the Actions tab
+
+# Default: this workflow can only read the repo. The deploy job asks for one extra permission.
+permissions:
+  contents: read
+
+env:
+  REGISTRY: foodcourt48516          # Azure Container Registry name
+  RESOURCE_GROUP: rg-foodcourt
+  CLUSTER: aks-foodcourt
+  NAMESPACE: food-court
+
+jobs:
+  test:
+    name: Test (docker compose)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # --wait = don't continue until every service's healthcheck says "healthy"
+      - name: Start the app
+        run: docker compose up --build -d --wait
+
+      - name: Smoke tests (through nginx, like a browser would)
+        run: |
+          set -x
+          curl -fsS localhost:8080/healthz
+          curl -fsS localhost:8080/api/menu | grep -q "Masala Dosa"
+
+          # Place an order: 2 x Masala Dosa (Rs 120) should cost 240
+          curl -fsS -X POST localhost:8080/api/orders \
+               -H 'Content-Type: application/json' -d '{"dish_id": 1, "quantity": 2}' \
+            | grep -q '"total_price":240'
+          curl -fsS localhost:8080/api/orders | grep -q '"dish_name":"Masala Dosa"'
+
+          # A dish that doesn't exist must give 404
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8080/api/orders \
+                 -H 'Content-Type: application/json' -d '{"dish_id": 99, "quantity": 1}')
+          test "$code" = 404
+
+      - name: Show logs (only if something failed)
+        if: failure()
+        run: docker compose logs
+
+      - name: Stop the app
+        if: always()
+        run: docker compose down -v
+
+  deploy:
+    name: Deploy to AKS
+    needs: test                                       # only runs if "test" passed
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write    # allows the job to request the OIDC token that Azure trusts
+    concurrency:
+      group: deploy-aks  # never run two deployments at the same time
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+
+      # Tag images with the short commit id (e.g. 3f2a9c1), so every deployment
+      # is traceable to the exact code that produced it.
+      - name: Set the image tag
+        run: echo "IMAGE_TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: Log in to Azure (OIDC, no password)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # GitHub's machines are already amd64, the same as AKS. --platform just makes that explicit.
+      - name: Build and push the images
+        run: |
+          az acr login --name "$REGISTRY"
+          for svc in menu-service order-service frontend; do
+            image="$REGISTRY.azurecr.io/$svc:$IMAGE_TAG"
+            docker build --platform linux/amd64 -t "$image" "./$svc"
+            docker push "$image"
+          done
+
+      - uses: azure/setup-kubectl@v4
+
+      - name: Connect to the AKS cluster
+        run: az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$CLUSTER" --overwrite-existing
+
+      # The files in k8s/ say ":v1". On GitHub's machine only (the repo isn't
+      # changed), swap that for this commit's tag before applying.
+      - name: Point the manifests at this commit's images
+        run: |
+          sed -i -E "s|($REGISTRY\.azurecr\.io/[a-z-]+):v1|\1:$IMAGE_TAG|" k8s/*.yaml
+          grep -h "image:" k8s/*.yaml
+
+      - name: Deploy and wait for the rollout
+        run: |
+          kubectl apply -f k8s/
+          for d in redis menu-service order-service frontend; do
+            kubectl -n "$NAMESPACE" rollout status deployment/"$d" --timeout=180s
+          done
+          # Deliberately no "kubectl get service": the logs of a public repo are
+          # public, and we keep the app's public IP out of them.
+          kubectl -n "$NAMESPACE" get pods

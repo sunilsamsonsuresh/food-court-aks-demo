@@ -225,3 +225,15 @@ kubectl get service frontend --watch    # wait for EXTERNAL-IP, then open http:/
 ```
 
 Remove the app (including its public IP and disk): `kubectl delete namespace food-court`
+
+## CI/CD (GitHub Actions)
+
+`.github/workflows/ci-cd.yml` runs on GitHub:
+
+| Job | When | What it does |
+|-----|------|--------------|
+| **Test (docker compose)** | Every pull request and push | Starts the whole app with docker compose and runs smoke tests through nginx |
+| **Deploy to AKS** | Push to `main`, only if the tests passed | Builds the images, pushes them to ACR tagged with the commit ID, and runs `kubectl apply` on AKS |
+
+Azure login uses **OIDC** (a federated credential), so no Azure passwords are stored in GitHub.
+One-time setup (managed identity, roles, 3 repository secrets): see [DEPLOYMENT.md, Step 14](DEPLOYMENT.md#step-14-cicd-with-github-actions).

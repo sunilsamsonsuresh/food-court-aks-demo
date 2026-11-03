@@ -27,8 +27,9 @@ we did them, with a short plain-English explanation of each step.
 12. [Step 11: Open the app and fix the browser timeout](#step-11-open-the-app-and-fix-the-browser-timeout)
 13. [Step 12: Find everything in the Azure Portal](#step-12-find-everything-in-the-azure-portal)
 14. [Step 13: Costs and cleanup](#step-13-costs-and-cleanup)
-15. [Problems we hit and how we fixed them](#problems-we-hit-and-how-we-fixed-them)
-16. [Command cheat sheet](#command-cheat-sheet)
+15. [Step 14: CI/CD with GitHub Actions](#step-14-cicd-with-github-actions)
+16. [Problems we hit and how we fixed them](#problems-we-hit-and-how-we-fixed-them)
+17. [Command cheat sheet](#command-cheat-sheet)
 
 ---
 
@@ -811,6 +812,150 @@ subscription 1, e.g. US$50, email alerts at 50% and 90%.
 | **Delete everything in Azure** | `az group delete --name rg-foodcourt --yes --no-wait` | Cluster, `MC_` group, registry, images, IPs, disks: all gone |
 
 Everything can be recreated from this document and the files in the project.
+
+---
+
+## Step 14: CI/CD with GitHub Actions
+
+**Where:** `.github/workflows/ci-cd.yml` in the repo, plus a one-time setup in Azure and GitHub · **Cost:** GitHub Actions is free for public repos. Each deployment adds about 120 MB of images to the registry (10 GB is included).
+
+Steps 4 and 10 were done by hand. CI/CD makes GitHub do them automatically on every change.
+
+| Term | Food court analogy | In this project |
+|---|---|---|
+| **CI** (Continuous Integration) | A taste-tester checks every new recipe before it reaches customers | Job `test`: on every pull request and push, start the whole app with docker compose and run smoke tests |
+| **CD** (Continuous Delivery/Deployment) | A delivery van restocks the food court with the approved recipe | Job `deploy`: on `main` only, and only if `test` passed, build the images, push them to ACR and roll them out to AKS |
+| **OIDC federated credential** | A guest list at the door: "anyone sent by repo X, branch main, may enter". No keys are handed out | Azure trusts GitHub's short-lived tokens for this repo's `main` branch only. No passwords are stored in GitHub |
+
+### How a change flows
+
+```
+ you: git push a branch ──► open a pull request
+                               │
+                               ▼
+                     GitHub Actions: test (CI)        ← docker compose + smoke tests
+                               │ ✅
+ you: merge the PR into main ──┘
+                               │
+                               ▼
+                     GitHub Actions: test (CI) ──✅──► deploy (CD)
+                                                       1. log in to Azure (OIDC)
+                                                       2. build + push images  :<commit-id>
+                                                       3. kubectl apply -f k8s/   (with :<commit-id>)
+                                                       4. wait for the rollout
+```
+
+**Image tags:** the pipeline tags images with the short commit ID (e.g.
+`menu-service:3f2a9c1`) instead of `v1`, so every running version can be traced
+back to its exact code. The `k8s/` files in the repo still say `:v1`. The
+pipeline swaps the tag on GitHub's machine only, just before `kubectl apply`.
+
+> ⚠️ Once CI/CD is in use, **deploy through the pipeline**. Running
+> `kubectl apply -f k8s/` by hand from the Mac would roll the cluster back to the old `:v1` images.
+
+### 14a. Give GitHub permission to deploy (Azure Portal, one time)
+
+We create a **user-assigned managed identity**: an Azure identity that isn't a
+person. GitHub logs in as it. It lives in `rg-foodcourt`, so deleting the
+resource group deletes it too. Managed identities are free.
+
+**1. Create the identity**
+
+1. Search **Managed Identities → + Create**
+2. Subscription: Azure subscription 1 · Resource group: **rg-foodcourt** · Region: **Central India** · Name: **id-github-foodcourt**
+3. **Review + create → Create**
+
+**2. Trust GitHub's tokens for this repo's main branch (federated credential)**
+
+1. Open **id-github-foodcourt → Settings → Federated credentials → + Add credential**
+2. Federated credential scenario: **GitHub Actions deploying Azure resources**
+3. Organization: **sunilsamsonsuresh** · Repository: **food-court-aks-demo**
+4. Entity: **Branch** · Branch: **main**
+5. Name: **github-main** → **Add**
+
+The subject it creates is `repo:sunilsamsonsuresh/food-court-aks-demo:ref:refs/heads/main`.
+Pull requests (including from forks) and other branches **can't** log in. Only code on `main` can deploy.
+
+**3. Let it push images: `AcrPush` on the registry**
+
+1. Open **foodcourt48516 → Access control (IAM) → + Add → Add role assignment**
+2. Role: search **AcrPush** → select → **Next**
+3. Assign access to: **Managed identity** → **+ Select members** → Managed identity: **User-assigned managed identity** → pick **id-github-foodcourt** → **Select**
+4. **Review + assign**
+
+**4. Let it connect to the cluster: `Azure Kubernetes Service Cluster User Role` on the cluster**
+
+1. Open **aks-foodcourt → Access control (IAM) → + Add → Add role assignment**
+2. Role: **Azure Kubernetes Service Cluster User Role** → **Next**
+3. Members: same as above → **id-github-foodcourt**
+4. **Review + assign**
+
+> Our cluster uses *local accounts*, so this role gives the pipeline full
+> control of the cluster. That's fine for a learning project. Production clusters use
+> Microsoft Entra ID with narrower Kubernetes permissions.
+
+**Terminal equivalent of 14a**
+
+```bash
+az identity create -g rg-foodcourt -n id-github-foodcourt -l centralindia
+
+az identity federated-credential create -g rg-foodcourt --identity-name id-github-foodcourt \
+  --name github-main \
+  --issuer https://token.actions.githubusercontent.com \
+  --subject repo:sunilsamsonsuresh/food-court-aks-demo:ref:refs/heads/main \
+  --audiences api://AzureADTokenExchange
+
+PRINCIPAL_ID=$(az identity show -g rg-foodcourt -n id-github-foodcourt --query principalId -o tsv)
+az role assignment create --assignee-object-id "$PRINCIPAL_ID" --assignee-principal-type ServicePrincipal \
+  --role AcrPush --scope "$(az acr show -n foodcourt48516 --query id -o tsv)"
+az role assignment create --assignee-object-id "$PRINCIPAL_ID" --assignee-principal-type ServicePrincipal \
+  --role "Azure Kubernetes Service Cluster User Role" \
+  --scope "$(az aks show -g rg-foodcourt -n aks-foodcourt --query id -o tsv)"
+```
+
+### 14b. Tell GitHub which identity to use (three repository secrets)
+
+These are IDs, not passwords. We store them as **secrets** anyway, because
+GitHub then hides them in the (public) logs.
+
+| Secret | Where to find it in the Portal |
+|---|---|
+| `AZURE_CLIENT_ID` | **id-github-foodcourt → Overview → Client ID** |
+| `AZURE_TENANT_ID` | **Microsoft Entra ID → Overview → Tenant ID** |
+| `AZURE_SUBSCRIPTION_ID` | **Subscriptions → Azure subscription 1 → Subscription ID** |
+
+**On GitHub:** repo → **Settings → Secrets and variables → Actions → New repository secret**, once for each.
+
+**Or from the terminal** (copies the values directly, without printing them):
+
+```bash
+gh secret set AZURE_CLIENT_ID       --body "$(az identity show -g rg-foodcourt -n id-github-foodcourt --query clientId -o tsv)"
+gh secret set AZURE_TENANT_ID       --body "$(az account show --query tenantId -o tsv)"
+gh secret set AZURE_SUBSCRIPTION_ID --body "$(az account show --query id -o tsv)"
+```
+
+### 14c. Watch it run
+
+- **GitHub → Actions tab**: every run, with each step's log
+- **A pull request's "Checks"** section: the `Test (docker compose)` result
+- Run a deployment without a code change: **Actions → CI/CD → Run workflow** (on `main`)
+- Terminal: `gh run list` · `gh run watch`
+
+Check the result on the cluster:
+
+```bash
+kubectl -n food-court get deployment -o wide    # IMAGES column shows :<commit-id>
+```
+
+### Things to know
+
+| Situation | What happens |
+|---|---|
+| The cluster is **stopped** (`az aks stop`) | The deploy job fails at "Connect to the AKS cluster". Start the cluster and click **Re-run jobs** |
+| A docs-only change (`*.md`) is pushed to `main` | No run (`paths-ignore`) |
+| The smoke tests fail | `deploy` is skipped. Nothing broken reaches the cluster |
+| Many deployments over time | Old image tags pile up in the registry. Delete old ones in **foodcourt48516 → Repositories** |
+| Public repo, public logs | The workflow never prints the app's public IP, and secrets are masked |
 
 ---
 
